@@ -243,7 +243,7 @@ def get_book_names(project_folder: Path) -> list[str]:
     return: a list of book names with their corresponding file names
     """
     names = []
-    books = (book for book in listdir(project_folder) if ".usfm" in book)
+    books = sorted(book for book in listdir(project_folder) if ".usfm" in book)
     for book in books:
         name = re.sub(BOOK_NUM, "", book)
         name = re.sub(EXCLUDE_ALPHANUMERICS, "", name)
@@ -256,12 +256,13 @@ def write_temp_settings_file(project_folder: Path, post_part: str) -> None:
     """
     writes a temporary settings file as a place holder to be able to determine the versification
     param project_folder: the path to the project folder
+    param post_part: the file name suffix shared by the book files, e.g. "eng-web.usfm"
     """
     with open(project_folder / "Settings.xml", "w", encoding="utf-8") as set_file:
         set_file.write(
             f"""<ScriptureText>
             <BiblicalTermsListSetting>Major::BiblicalTerms.xml</BiblicalTermsListSetting>
-            <Naming BookNameForm="46-MAT" PostPart="{post_part}.usfm" PrePart="" />
+            <Naming BookNameForm="MAT" PostPart="{post_part}" PrePart="" />
             </ScriptureText>"""
         )
 
@@ -274,18 +275,35 @@ def get_corpus(
     param project_folder: the path to the project folder
     param vrs_diffs: the list of differences in the versifications
     return: the corpus from the available books in the specified bible
+
+    The book files are copied without their number prefix ("74-ACTeng-web.usfm" ->
+    "ACTeng-web.usfm") and read with BookNameForm="MAT". The prefix numbers in eBible
+    zips are eBible's own and vary between projects (MAT is 46 in an NT-only zip, 70 in
+    the WEB), so no Paratext BookNameForm with digits can match them.
     """
     vrs_path = project_folder / "versification"
     vrs_path.mkdir(parents=True, exist_ok=True)
-    book_names = get_book_names(project_folder)
-    for name in book_names:
-        if name[0] in vrs_diffs.keys():
-            shutil.copyfile(project_folder / name[1], vrs_path / name[1])
-    write_temp_settings_file(vrs_path, project_folder.name)
+    post_part = None
+    for book_id, file_name in get_book_names(project_folder):
+        if book_id not in vrs_diffs:
+            continue
+        unnumbered = re.sub(BOOK_NUM, "", file_name)
+        if not unnumbered.startswith(book_id):
+            continue
+        post_part = post_part or unnumbered[len(book_id) :]
+        shutil.copyfile(project_folder / file_name, vrs_path / unnumbered)
+    if post_part is None:
+        shutil.rmtree(vrs_path)
+        return []
+    write_temp_settings_file(vrs_path, post_part)
     corpus = ParatextTextCorpus(vrs_path)
     lines = list(extract_scripture_corpus(corpus, corpus))
     shutil.rmtree(vrs_path)
-    
+    if not any(text for text, _, _ in lines):
+        raise ValueError(
+            f"Read no verses from the book files copied from {project_folder}; "
+            f"check that they are named <BOOK>{post_part}."
+        )
     return lines
 
 
@@ -302,10 +320,10 @@ def get_versification(
     lines = get_corpus(project_folder, vrs_diffs)
     versifications = list(vrs_to_num.keys())
     ruled_out = []
-    try:
-        prev = lines[0][1]
-    except:
+    if not lines:
+        # None of the books that distinguish versifications is present.
         return versifications[0]
+    prev = lines[0][1]
     for line in lines[1:]:
         vref = line[1]
         try:
